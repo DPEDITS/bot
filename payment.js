@@ -45,10 +45,10 @@ async function createPaymentLink(
 
                 reminder_enable: true,
 
-                notes: {
-                    telegramId:
-                        String(chatId)
-                }
+notes: {
+    telegramId: String(chatId),
+    username: msg.from.username || "no_username"
+}
             });
 
         return payment;

@@ -8,9 +8,10 @@ const { getSubjectAttendance, getResultPDF } = require("./attendance");
 const { loadModification, submitCanteen } = require("./canteen");
 
 // ================= BOT =================
-const bot = new TelegramBot(process.env.BOT_TOKEN, {
-    polling: true,
-});
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
+// ================= MENU =================
+bot.setMyCommands([{ command: "start", description: "Start Bot" }]);
 
 // ================= RAZORPAY =================
 const razorpay = new Razorpay({
@@ -18,91 +19,156 @@ const razorpay = new Razorpay({
     key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// ================= PREMIUM STORAGE =================
+// ================= PREMIUM DB =================
 const PREMIUM_FILE = "./premium.json";
-let premiumUsers = {};
 
-if (fs.existsSync(PREMIUM_FILE)) {
-    premiumUsers = JSON.parse(fs.readFileSync(PREMIUM_FILE));
-}
+let premiumUsers = fs.existsSync(PREMIUM_FILE)
+    ? JSON.parse(fs.readFileSync(PREMIUM_FILE))
+    : {};
 
 function savePremiumUsers() {
     fs.writeFileSync(PREMIUM_FILE, JSON.stringify(premiumUsers, null, 2));
 }
 
-function isPremium(userId) {
-    return premiumUsers[userId] && Date.now() < premiumUsers[userId];
+// ================= STATE =================
+let sessions = {};
+let uiMessage = {};
+let messageStore = {};
+let canteenLock = {};
+
+// ================= TRACK SYSTEM (FIXED) =================
+
+// Track ALL messages (bot + user metadata)
+bot.on("message", (msg) => {
+    const chatId = msg.chat.id;
+
+    if (!messageStore[chatId]) {
+        messageStore[chatId] = [];
+    }
+
+    messageStore[chatId].push({
+        id: msg.message_id,
+        fromBot: msg.from.is_bot,
+        text: msg.text || null
+    });
+});
+
+// ================= UI ENGINE =================
+async function render(chatId, text, buttons = []) {
+    const opts = { reply_markup: { inline_keyboard: buttons } };
+
+    try {
+        if (uiMessage[chatId]) {
+            try {
+                await bot.editMessageText(text, {
+                    chat_id: chatId,
+                    message_id: uiMessage[chatId],
+                    ...opts
+                });
+                return;
+            } catch {
+                // fallback if edit fails
+            }
+        }
+
+        const msg = await bot.sendMessage(chatId, text, opts);
+        uiMessage[chatId] = msg.message_id;
+
+        // track bot message properly
+        if (!messageStore[chatId]) messageStore[chatId] = [];
+        messageStore[chatId].push({
+            id: msg.message_id,
+            fromBot: true
+        });
+
+    } catch (err) {
+        console.log("Render error:", err.message);
+    }
 }
 
-// ================= AUTO SESSION CLEANUP (1 DAY) =================
-let sessions = {};
-
-setInterval(() => {
-    const now = Date.now();
-
-    for (const id in sessions) {
-        if (sessions[id]?.createdAt && now - sessions[id].createdAt > 24 * 60 * 60 * 1000) {
-            delete sessions[id];
-        }
-    }
-}, 60 * 60 * 1000);
-
-// ================= SUBJECTS =================
+// ================= DATA =================
 const SUBJECTS_23 = [
     { name: "Advanced Machine Learning", code: "BTCS-T-PE-055" },
     { name: "Big Data Analytics", code: "BTCS-T-PE-058" },
     { name: "Compiler Design", code: "BTCS-T-PC-020" },
     { name: "Computer Graphics", code: "BTCS-T-PE-028" },
     { name: "Cryptography & Network Security", code: "BTCS-T-PE-059" },
-    { name: "Internet of Things", code: "BTCS-T-PC-056" },
+    { name: "IoT", code: "BTCS-T-PC-056" },
     { name: "Software Engineering", code: "BTCS-T-PC-026" },
-    { name: "Natural Language Processing", code: "BTCS-T-PE-052" },
+    { name: "NLP", code: "BTCS-T-PE-052" },
 ];
 
-// ================= PAYMENT =================
-async function createPaymentLink(chatId) {
-    try {
-        return await razorpay.paymentLink.create({
-            amount: 100,
-            currency: "INR",
-            description: "Telegram Premium",
-            customer: { name: "Telegram User" },
-            notify: { sms: false, email: false },
-            notes: { telegramId: String(chatId) },
-            callback_method: "get"
-        });
-    } catch (err) {
-        console.log(err);
-        return null;
-    }
+const SECTIONS = ["A", "B", "C", "D"];
+const DAYS = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"];
+
+// ================= HOME UI =================
+function homeUI() {
+    return [
+        [{ text: "📊 Attendance", callback_data: "att" }],
+        [{ text: "📈 Result PDF", callback_data: "res" }],
+        [{ text: "🍽 Canteen", callback_data: "canteen" }],
+        [{ text: "💎 Buy Premium", callback_data: "premium" }],
+        [{ text: "🔄 Reset", callback_data: "reset" }]
+    ];
 }
 
-async function verifyPayment(linkId) {
+// ================= PAYMENT =================
+async function createPaymentLink(chatId, username) {
+    return razorpay.paymentLink.create({
+        amount: 2000,
+        currency: "INR",
+        description: "Premium Access",
+        customer: { name: "User" },
+        notes: {
+            telegramId: String(chatId),
+            username: username || "unknown"
+        }
+    }).catch(() => null);
+}
+
+async function verifyPayment(id) {
+    return razorpay.paymentLink.fetch(id).catch(() => null);
+}
+
+// ================= RESET (PRO VERSION FIXED) =================
+async function hardReset(chatId) {
     try {
-        return await razorpay.paymentLink.fetch(linkId);
+        // delete UI message (bot only)
+        if (uiMessage[chatId]) {
+            await bot.deleteMessage(chatId, uiMessage[chatId]).catch(() => {});
+        }
+
+        // delete tracked bot messages ONLY (safe)
+        if (messageStore[chatId]) {
+            for (const m of messageStore[chatId]) {
+                if (m.fromBot) {
+                    await bot.deleteMessage(chatId, m.id).catch(() => {});
+                }
+            }
+        }
+
     } catch (err) {
-        console.log(err);
-        return null;
+        console.log("Reset error:", err.message);
     }
+
+    // FULL CLEAN MEMORY
+    delete sessions[chatId];
+    delete uiMessage[chatId];
+    delete canteenLock[chatId];
+    delete messageStore[chatId];
+
+    const msg = await bot.sendMessage(chatId, "🔄 Reset Done", {
+        reply_markup: { inline_keyboard: homeUI() }
+    });
+
+    uiMessage[chatId] = msg.message_id;
 }
 
 // ================= START =================
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-
-    sessions[chatId] = { createdAt: Date.now() };
-
-    await bot.sendMessage(chatId, `🎓 Student Dashboard`, {
-        reply_markup: {
-            inline_keyboard: [
-                [{ text: "📊 Attendance", callback_data: "att" }],
-                [{ text: "📈 Result PDF", callback_data: "res" }],
-                [{ text: "🍽 Canteen", callback_data: "canteen" }],
-                [{ text: "💎 Buy Premium", callback_data: "premium" }],
-                [{ text: "🔄 Reset", callback_data: "reset" }],
-            ],
-        },
-    });
+    sessions[chatId] = {};
+    return render(chatId, "🎓 Student Dashboard", homeUI());
 });
 
 // ================= CALLBACK =================
@@ -110,244 +176,186 @@ bot.on("callback_query", async (q) => {
     const chatId = q.message.chat.id;
     const data = q.data;
 
-    if (!sessions[chatId]) {
-        sessions[chatId] = { createdAt: Date.now() };
-    }
+    if (!sessions[chatId]) sessions[chatId] = {};
 
-    // RESET
-    if (data === "reset") {
-        delete sessions[chatId];
-        return bot.sendMessage(chatId, "🔄 Reset done");
-    }
+    if (data === "home") return render(chatId, "🎓 Student Dashboard", homeUI());
+    if (data === "reset") return hardReset(chatId);
 
-    // PREMIUM
+    // ================= PREMIUM =================
     if (data === "premium") {
-        const payment = await createPaymentLink(chatId);
+        const pay = await createPaymentLink(chatId, q.from?.username);
+        if (!pay) return render(chatId, "❌ Payment Error");
 
-        if (!payment) return bot.sendMessage(chatId, "❌ Payment error");
+        sessions[chatId].payId = pay.id;
 
-        sessions[chatId].paymentLinkId = payment.id;
-
-        return bot.sendMessage(chatId,
-            `💎 Premium ₹1/day`, {
-            reply_markup: {
-                inline_keyboard: [
-                    [{ text: "💳 Pay", url: payment.short_url }],
-                    [{ text: "✅ Verify", callback_data: "verify_payment" }],
-                ],
-            },
-        });
+        return render(chatId, "💎 Premium ₹20/day", [
+            [{ text: "💳 Pay", url: pay.short_url }],
+            [{ text: "✅ Verify", callback_data: "verify" }],
+            [{ text: "🏠 Home", callback_data: "home" }]
+        ]);
     }
 
-    // VERIFY PAYMENT
-    if (data === "verify_payment") {
-        const linkId = sessions[chatId]?.paymentLinkId;
+    if (data === "verify") {
+        const p = await verifyPayment(sessions[chatId]?.payId);
 
-        if (!linkId) return bot.sendMessage(chatId, "❌ No payment found");
-
-        const payment = await verifyPayment(linkId);
-
-        if (payment?.status === "paid") {
-            premiumUsers[chatId] = Date.now() + 24 * 60 * 60 * 1000;
-            savePremiumUsers();
-
-            return bot.sendMessage(chatId, "✅ Premium Activated (1 Day)");
+        if (p?.status !== "paid") {
+            return render(chatId, "❌ Not Paid Yet", homeUI());
         }
 
-        return bot.sendMessage(chatId, "❌ Payment not completed");
-    }
-
-    // ATTENDANCE
-    if (data === "att") {
-        if (!isPremium(chatId))
-            return bot.sendMessage(chatId, "❌ Premium required");
-
-        sessions[chatId] = {
-            mode: "att",
-            step: "id",
-            createdAt: Date.now(),
+        premiumUsers[chatId] = {
+            expiresAt: Date.now() + 86400000,
+            canteenUsed: false
         };
 
-        return bot.sendMessage(chatId, "📊 Enter College ID");
+        canteenLock[chatId] = false;
+        savePremiumUsers();
+
+        return render(chatId, "✅ Premium Activated", homeUI());
     }
 
-    // RESULT
-    if (data === "res") {
-        if (!isPremium(chatId))
-            return bot.sendMessage(chatId, "❌ Premium required");
+    // ================= PREMIUM CHECK =================
+    if (["att", "res", "canteen"].includes(data)) {
+        const p = premiumUsers[chatId];
 
-        sessions[chatId] = {
-            mode: "res",
-            step: "id",
-            createdAt: Date.now(),
-        };
+        if (!p || Date.now() > p.expiresAt) {
+            return render(chatId, "❌ Premium Required", homeUI());
+        }
 
-        return bot.sendMessage(chatId, "📈 Enter College ID");
+        sessions[chatId] = { mode: data, step: "id" };
+        return render(chatId, "📌 Enter College ID");
     }
 
-    // CANTEEN
-    if (data === "canteen") {
-        if (!isPremium(chatId))
-            return bot.sendMessage(chatId, "❌ Premium required");
+    const s = sessions[chatId];
+    if (!s) return;
 
-        sessions[chatId] = {
-            mode: "canteen",
-            step: "id",
-            createdAt: Date.now(),
-        };
+    // ================= ATTENDANCE =================
+    if (s.mode === "att") {
 
-        return bot.sendMessage(chatId, "🍽 Enter College ID");
-    }
+        if (data.startsWith("sub_")) {
+            const i = +data.split("_")[1];
+            s.subject = SUBJECTS_23[i];
 
-    // SUBJECT
-    if (data.startsWith("sub_")) {
-        const index = parseInt(data.split("_")[1]);
+            return render(chatId, "Select Section", SECTIONS.map(sec => ([{
+                text: sec,
+                callback_data: `sec_${sec}`
+            }])));
+        }
 
-        sessions[chatId].subject = SUBJECTS_23[index];
-
-        return bot.sendMessage(chatId, "📌 Select Section", {
-            reply_markup: {
-                inline_keyboard: [
-                    [
-                        { text: "A", callback_data: "sec_A" },
-                        { text: "B", callback_data: "sec_B" },
-                    ],
-                    [
-                        { text: "C", callback_data: "sec_C" },
-                        { text: "D", callback_data: "sec_D" },
-                    ],
-                ],
-            },
-        });
-    }
-
-    // SECTION RESULT
-    if (data.startsWith("sec_")) {
-        const section = data.split("_")[1];
-        const session = sessions[chatId];
-
-        try {
-            const result = await getSubjectAttendance(
-                session.subject,
-                session.studentCode,
-                section
+        if (data.startsWith("sec_")) {
+            const r = await getSubjectAttendance(
+                s.subject,
+                s.studentCode,
+                data.split("_")[1]
             );
 
-            return bot.sendMessage(chatId,
-`📊 ${session.subject.name}
-Present: ${result.present}
-Absent: ${result.absent}
-Total: ${result.total}
-Attendance: ${result.percent}%`
-            );
-        } catch (e) {
-            return bot.sendMessage(chatId, "❌ Error fetching data");
+            return render(chatId,
+`📊 ${s.subject.name}
+Present: ${r.present}
+Absent: ${r.absent}
+Total: ${r.total}
+%: ${r.percent}`, homeUI());
+        }
+    }
+
+    // ================= RESULT =================
+    if (s.mode === "res") {
+        const file = await getResultPDF(s.studentCode);
+        await bot.sendDocument(chatId, file);
+        return render(chatId, "📈 Result Ready", homeUI());
+    }
+
+    // ================= CANTEEN =================
+    if (s.mode === "canteen") {
+
+        if (canteenLock[chatId] || premiumUsers[chatId]?.canteenUsed) {
+            return render(chatId, "❌ Already used. Buy again.", homeUI());
+        }
+
+        if (s.step === "meal") {
+            s.selectedMeal = data.split("_")[1];
+            s.step = "day";
+
+            return render(chatId, "Select Day", DAYS.map(d => ([{
+                text: d,
+                callback_data: `day_${d}`
+            }])));
+        }
+
+        if (s.step === "day") {
+            s.dayIndex = DAYS.indexOf(data.split("_")[1]);
+            s.step = "food";
+
+            return render(chatId, "Select Food", [
+                [{ text: "VEG", callback_data: "food_VEG" }],
+                [{ text: "NON-VEG", callback_data: "food_NON-VEG" }]
+            ]);
+        }
+
+        if (s.step === "food") {
+            const val = data.split("_")[1];
+
+            if (s.selectedMeal === "lunch")
+                s.lunchArr[s.dayIndex] = val;
+            else
+                s.dinnerArr[s.dayIndex] = val;
+
+            await submitCanteen({
+                user_code: s.studentCode,
+                breakFastArr: Array(7).fill("ALL"),
+                lunchArr: s.lunchArr,
+                dinnerArr: s.dinnerArr,
+                from_date: s.fromDate
+            });
+
+            premiumUsers[chatId].canteenUsed = true;
+            canteenLock[chatId] = true;
+            savePremiumUsers();
+
+            delete sessions[chatId];
+
+            return render(chatId, "✅ Canteen Updated", homeUI());
         }
     }
 });
 
-// ================= MESSAGE HANDLER =================
+// ================= MESSAGE FLOW =================
 bot.on("message", async (msg) => {
     if (!msg.text || msg.text.startsWith("/")) return;
 
     const chatId = msg.chat.id;
-    const text = msg.text.trim();
+    const s = sessions[chatId];
+    if (!s) return;
 
-    const session = sessions[chatId];
-    if (!session) return;
+    if (s.mode === "att" && s.step === "id") {
+        s.studentCode = "SITBBS" + msg.text.trim().toUpperCase();
 
-    // ATTENDANCE FLOW
-    if (session.mode === "att") {
-        if (session.step === "id") {
-            session.studentCode = "SITBBS" + text.toUpperCase();
-
-            const buttons = SUBJECTS_23.map((s, i) => [
-                { text: s.name, callback_data: `sub_${i}` }
-            ]);
-
-            return bot.sendMessage(chatId, "📚 Select Subject", {
-                reply_markup: { inline_keyboard: buttons },
-            });
-        }
+        return render(chatId, "Select Subject", SUBJECTS_23.map((x, i) => ([{
+            text: x.name,
+            callback_data: `sub_${i}`
+        }])));
     }
 
-    // RESULT FLOW
-    if (session.mode === "res") {
-        session.studentCode = "SITBBS" + text.toUpperCase();
-
-        try {
-            const file = await getResultPDF(session.studentCode);
-            return bot.sendDocument(chatId, file);
-        } catch {
-            return bot.sendMessage(chatId, "❌ Failed");
-        }
+    if (s.mode === "res") {
+        const file = await getResultPDF("SITBBS" + msg.text.trim().toUpperCase());
+        await bot.sendDocument(chatId, file);
+        return render(chatId, "Result Ready", homeUI());
     }
 
-    // ================= CANTEEN FULL FLOW =================
-    if (session.mode === "canteen") {
+    if (s.mode === "canteen" && s.step === "id") {
+        s.studentCode = "SITBBS" + msg.text.trim().toUpperCase();
 
-        const DAYS = ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY","SATURDAY","SUNDAY"];
+        const m = await loadModification(s.studentCode);
 
-        if (session.step === "id") {
-            session.studentCode = "SITBBS" + text.toUpperCase();
+        s.lunchArr = m.lunchArr;
+        s.dinnerArr = m.dinnerArr;
+        s.fromDate = new Date().toISOString().split("T")[0];
+        s.step = "meal";
 
-            const mealData = await loadModification(session.studentCode);
-
-            session.lunchArr = mealData.lunchArr;
-            session.dinnerArr = mealData.dinnerArr;
-
-            session.step = "date";
-
-            return bot.sendMessage(chatId, "📅 Enter Date (DD-MM-YYYY)");
-        }
-
-        if (session.step === "date") {
-            session.fromDate = text;
-            session.step = "meal";
-
-            return bot.sendMessage(chatId, "🍛 Lunch or Dinner?");
-        }
-
-        if (session.step === "meal") {
-            session.selectedMeal = text.toLowerCase();
-            session.step = "day";
-
-            return bot.sendMessage(chatId, "📅 Enter Day (Monday-Sunday)");
-        }
-
-        if (session.step === "day") {
-            session.dayIndex = DAYS.indexOf(text.toUpperCase());
-            session.step = "value";
-
-            return bot.sendMessage(chatId, "🍽 VEG / NON-VEG / EGG");
-        }
-
-        if (session.step === "value") {
-            const value = text.toUpperCase();
-
-            if (session.selectedMeal === "lunch") {
-                session.lunchArr[session.dayIndex] = value;
-            } else {
-                session.dinnerArr[session.dayIndex] = value;
-            }
-
-            await submitCanteen({
-                category: "Resident",
-                user_code: session.studentCode,
-                breakFastArr: ["ALL","ALL","ALL","ALL","ALL","ALL","ALL"],
-                lunchArr: session.lunchArr,
-                dinnerArr: session.dinnerArr,
-                caution_diposit: "YES",
-                type: "Registration",
-                record_status: "Completed",
-                from_date: session.fromDate
-            });
-
-            delete sessions[chatId];
-
-            return bot.sendMessage(chatId, "✅ Canteen Updated");
-        }
+        return render(chatId, "Select Meal", [
+            [{ text: "Lunch", callback_data: "meal_lunch" }],
+            [{ text: "Dinner", callback_data: "meal_dinner" }]
+        ]);
     }
 });
 
-console.log("✅ Bot Running...");
+console.log("🚀 BOT RUNNING - PRO RESET + FULL TRACKING SYSTEM");

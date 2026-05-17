@@ -31,19 +31,39 @@ app.post("/razorpay-webhook", (req, res) => {
             .digest("hex");
 
         if (signature !== expected) {
-            return res.status(400).send("Invalid");
+            return res.status(400).send("Invalid signature");
         }
 
-        const payment = req.body.payload.payment_link.entity;
+        const payload = req.body.payload;
 
-        const telegramId = payment.notes.telegramId;
+        // safer extraction
+        const paymentEntity =
+            payload.payment_link?.entity ||
+            payload.payment?.entity;
 
-        // 1 DAY PREMIUM
-        premiumUsers[telegramId] = Date.now() + 24 * 60 * 60 * 1000;
+        if (!paymentEntity) {
+            return res.status(400).send("No payment data");
+        }
+
+        const telegramId = paymentEntity.notes?.telegramId;
+        const username = paymentEntity.notes?.username || "unknown";
+
+        if (!telegramId) {
+            return res.status(400).send("Missing telegramId");
+        }
+
+        // ================= STORE PREMIUM =================
+        premiumUsers[telegramId] = {
+            username: username,
+            expiry: Date.now() + 24 * 60 * 60 * 1000 // 1 day
+        };
 
         save();
 
-        console.log("Premium Activated:", telegramId);
+        console.log("✅ Premium Activated:", {
+            telegramId,
+            username
+        });
 
         res.send("OK");
 
