@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Install Attendance Extension</title>
+  <style>
+    body {
+      font-family: Arial;
+      text-align: center;
+      padding: 40px;
+      background: #111;
+      color: #fff;
+    }
+    button {
+      padding: 15px 25px;
+      font-size: 16px;
+      border-radius: 8px;
+      border: none;
+      background: #00ff9d;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+<h1>📊 Attendance Extension</h1>
+<p>Install in 30 seconds</p>
+
+<button onclick="download()">⬇ Download Extension</button>
+
+<h3>Steps:</h3>
+<p>1. Open brave://extensions/</p>
+<p>2. Enable Developer Mode</p>
+<p>3. Click "Load Unpacked"</p>
+<p>4. Select the downloaded folder</p>
+
+<script>
+function download() {
+  window.location.href = "attendance-extension.zip";
+}
+</script>
+
+</body>
+</html>

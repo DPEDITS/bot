@@ -1,137 +1,58 @@
 require("dotenv").config();
-
-const express =
-    require("express");
-
-const crypto =
-    require("crypto");
-
-const fs =
-    require("fs");
+const express = require("express");
+const crypto = require("crypto");
+const fs = require("fs");
 
 const app = express();
+app.use(express.json());
 
-app.use(
-    express.json()
-);
-
-// ================= PREMIUM FILE =================
-const PREMIUM_FILE =
-    "./premium.json";
+const PREMIUM_FILE = "./premium.json";
 
 let premiumUsers = {};
 
 if (fs.existsSync(PREMIUM_FILE)) {
-
-    premiumUsers =
-        JSON.parse(
-            fs.readFileSync(
-                PREMIUM_FILE
-            )
-        );
+    premiumUsers = JSON.parse(fs.readFileSync(PREMIUM_FILE));
 }
 
-function savePremiumUsers() {
-
-    fs.writeFileSync(
-        PREMIUM_FILE,
-
-        JSON.stringify(
-            premiumUsers,
-            null,
-            2
-        )
-    );
+function save() {
+    fs.writeFileSync(PREMIUM_FILE, JSON.stringify(premiumUsers, null, 2));
 }
 
 // ================= WEBHOOK =================
-app.post(
-    "/razorpay-webhook",
+app.post("/razorpay-webhook", (req, res) => {
+    try {
+        const secret = process.env.WEBHOOK_SECRET;
 
-    (req, res) => {
+        const signature = req.headers["x-razorpay-signature"];
 
-        try {
+        const expected = crypto
+            .createHmac("sha256", secret)
+            .update(JSON.stringify(req.body))
+            .digest("hex");
 
-            const secret =
-                "YOUR_WEBHOOK_SECRET";
-
-            const signature =
-                req.headers[
-                    "x-razorpay-signature"
-                ];
-
-            const expected =
-                crypto
-                .createHmac(
-                    "sha256",
-                    secret
-                )
-                .update(
-                    JSON.stringify(
-                        req.body
-                    )
-                )
-                .digest("hex");
-
-            if (
-                signature !== expected
-            ) {
-
-                return res
-                    .status(400)
-                    .send(
-                        "Invalid Signature"
-                    );
-            }
-
-            const payload =
-                req.body.payload
-                .payment_link
-                .entity;
-
-            const telegramId =
-                payload.notes
-                .telegramId;
-
-            // 30 days premium
-            premiumUsers[
-                telegramId
-            ] =
-                Date.now() +
-                (
-                    30 *
-                    24 *
-                    60 *
-                    60 *
-                    1000
-                );
-
-            savePremiumUsers();
-
-            console.log(
-                "Premium Activated:",
-                telegramId
-            );
-
-            res.send("OK");
-
-        } catch (err) {
-
-            console.log(err);
-
-            res.status(500)
-                .send("Error");
+        if (signature !== expected) {
+            return res.status(400).send("Invalid");
         }
+
+        const payment = req.body.payload.payment_link.entity;
+
+        const telegramId = payment.notes.telegramId;
+
+        // 1 DAY PREMIUM
+        premiumUsers[telegramId] = Date.now() + 24 * 60 * 60 * 1000;
+
+        save();
+
+        console.log("Premium Activated:", telegramId);
+
+        res.send("OK");
+
+    } catch (err) {
+        console.log(err);
+        res.status(500).send("error");
     }
-);
+});
 
-app.listen(
-    3000,
-
-    () => {
-
-        console.log(
-            "Webhook Server Running"
-        );
-    }
-);
+app.listen(3000, () => {
+    console.log("Webhook running on 3000");
+});
