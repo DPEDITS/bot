@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Attendance Helper",
+  "version": "1.0",
+  "description": "Shows attendance insights",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["https://erp.silicon.ac.in/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://erp.silicon.ac.in/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
